@@ -1,10 +1,16 @@
 use anchor_lang::prelude::*;
-use anchor_spl::{associated_token::AssociatedToken, token::{transfer_checked, TransferChecked}, token_interface::{Mint, TokenAccount, TokenInterface}};
+use anchor_spl::{associated_token::AssociatedToken, token::{transfer_checked, TransferChecked, Token, Mint, TokenAccount}};
 use constant_product_curve::{ConstantProduct, LiquidityPair, SwapResult};
 
 use crate::state::Config;
 use crate::errors::AmmError;
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct SwapArgs {
+    pub is_x: bool,
+    pub amount: u64, 
+    pub min: u64,
+}
 
 #[derive(Accounts)]
 pub struct Swap<'info> {
@@ -28,46 +34,39 @@ pub struct Swap<'info> {
         mint::decimals = 6,
         mint::authority = config
     )]
-    pub mint_lp: InterfaceAccount<'info, Mint>, 
-    pub mint_x: InterfaceAccount<'info, Mint>,
-    pub mint_y: InterfaceAccount<'info, Mint>, 
+    pub mint_lp: Account<'info, Mint>, 
+    pub mint_x: Account<'info, Mint>,
+    pub mint_y: Account<'info, Mint>, 
     #[account(
         mut,
         associated_token::mint = mint_x,
         associated_token::authority = config,
     )]
-    pub vault_x: InterfaceAccount<'info, TokenAccount>,
+    pub vault_x: Account<'info, TokenAccount>,
     #[account(
         mut,
         associated_token::mint = mint_y,
         associated_token::authority = config,
     )]
-    pub vault_y: InterfaceAccount<'info, TokenAccount>,
+    pub vault_y: Account<'info, TokenAccount>,
     #[account(
         init_if_needed,
         payer = user,
         associated_token::mint = mint_x,
         associated_token::authority = user,
     )]
-    pub user_ata_x: InterfaceAccount<'info, TokenAccount>,
+    pub user_ata_x: Account<'info, TokenAccount>,
     #[account(
         init_if_needed,
         payer = user,
         associated_token::mint = mint_y,
         associated_token::authority = user,
     )]
-    pub user_ata_y: InterfaceAccount<'info, TokenAccount>,
+    pub user_ata_y: Account<'info, TokenAccount>,
 
-    pub token_program: Interface<'info, TokenInterface>,
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub associated_token_program: Program<'info, AssociatedToken>,
-}
-
-#[account]
-pub struct SwapArgs {
-    is_x: bool,
-    amount: u64, 
-    min: u64,
 }
 
 impl<'info> Swap<'info> {
@@ -75,20 +74,24 @@ impl<'info> Swap<'info> {
         require!(args.amount > 0, AmmError::InvalidAmount);
         require!(self.config.locked == false, AmmError::AMMLocked);
 
+        // FIXED: Check for zero balance before creating curve
+        require!(self.vault_x.amount > 0 && self.vault_y.amount > 0, AmmError::InsufficientBalance);
+        require!(self.mint_lp.supply > 0, AmmError::InsufficientBalance);
+
         let mut curve = ConstantProduct::init(
             self.vault_x.amount,
             self.vault_y.amount,
             self.mint_lp.supply,
             self.config.fee, 
             None,
-        ).unwrap();
+        ).map_err(|e| AmmError::from(e))?; // FIXED: Handle error properly
 
         let p = match args.is_x {
             true => LiquidityPair::X,
             false => LiquidityPair::Y,
         };
 
-        let res = curve.swap(p, args.amount, args.min).map_err(AmmError::from)?;
+        let res = curve.swap(p, args.amount, args.min).map_err(|e| AmmError::from(e))?;
 
         require_neq!(res.deposit, 0, AmmError::InvalidAmount);
         require_neq!(res.withdraw, 0, AmmError::InvalidAmount);
@@ -109,7 +112,8 @@ impl<'info> Swap<'info> {
     fn transfer_to_vault(&mut self, args: SwapArgs, res: SwapResult) -> Result<()> {
         let cpi_program = self.token_program.to_account_info();
 
-        let (cpi_accounts, mint_decimaks) = match args.is_x {
+        // FIXED: Correct token account assignment
+        let (cpi_accounts, mint_decimals) = match args.is_x {
             true => ( TransferChecked {
                 from: self.user_ata_x.to_account_info(),
                 mint: self.mint_x.to_account_info(),
@@ -117,16 +121,16 @@ impl<'info> Swap<'info> {
                 authority: self.user.to_account_info(),
             }, self.mint_x.decimals),
             false => ( TransferChecked {
-                from: self.user_ata_x.to_account_info(),
-                mint: self.mint_x.to_account_info(),
-                to: self.vault_x.to_account_info(),
+                from: self.user_ata_y.to_account_info(), // FIXED: was user_ata_x
+                mint: self.mint_y.to_account_info(),     // FIXED: was mint_x
+                to: self.vault_y.to_account_info(),      // FIXED: was vault_x
                 authority: self.user.to_account_info(),
-            }, self.mint_x.decimals),
+            }, self.mint_y.decimals),                    // FIXED: was mint_x.decimals
         };
 
         let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
 
-        transfer_checked(cpi_ctx, res.deposit, mint_decimaks)?;
+        transfer_checked(cpi_ctx, res.deposit, mint_decimals)?;
 
         Ok(())
     }
@@ -150,15 +154,17 @@ impl<'info> Swap<'info> {
             }, self.mint_x.decimals),
         };
 
+        let mint_x = self.mint_x.key().to_bytes();
+        let mint_y = self.mint_y.key().to_bytes();
+        let seed = self.config.seed.to_le_bytes();
 
-        let config_bump = self.config.seed.to_le_bytes();
-
+        // FIXED: Add config bump to signer seeds
         let seeds = [
             b"config", 
-            self.mint_x.to_account_info().key.as_ref(),
-            self.mint_y.to_account_info().key.as_ref(),
-            config_bump.as_ref(),
-            &[self.config.config_bump],
+            mint_x.as_ref(),
+            mint_y.as_ref(),
+            seed.as_ref(),
+            &[self.config.config_bump]
         ];
 
         let signer_seeds =  &[&seeds[..]];

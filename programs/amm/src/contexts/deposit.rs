@@ -1,21 +1,18 @@
-use anchor_lang ::prelude::*;
+use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{transfer_checked, MintTo, mint_to, TransferChecked};
-use anchor_spl::token_interface::{TokenInterface, Mint, TokenAccount};
+use anchor_spl::token::{transfer_checked, mint_to, MintTo, TransferChecked, Token, Mint, TokenAccount};
 
 use constant_product_curve::ConstantProduct;
 
-use crate ::state::Config;
-use crate ::errors::AmmError;
-
+use crate::state::Config;
+use crate::errors::AmmError;
 
 #[derive(Accounts)]
-
-pub struct Deposit <'info> {
+pub struct Deposit<'info> {
     #[account(mut)]
-    pub lp_provider : Signer<'info>,
-    pub mint_x : InterfaceAccount<'info, Mint>,
-    pub mint_y : InterfaceAccount<'info, Mint>,
+    pub lp_provider: Signer<'info>,
+    pub mint_x: Account<'info, Mint>,
+    pub mint_y: Account<'info, Mint>,
     #[account(
         has_one = mint_x,
         has_one = mint_y,
@@ -27,49 +24,49 @@ pub struct Deposit <'info> {
         ],
         bump = config.config_bump,
     )]
-    pub config : Account<'info, Config>,
+    pub config: Account<'info, Config>,
     #[account(
-        seeds = [b"lp",config.key().as_ref()],
+        mut,
+        seeds = [b"lp", config.key().as_ref()],
         bump = config.lp_bump,
         mint::decimals = 6,
         mint::authority = config,
     )]
-
-    pub lp_mint : InterfaceAccount<'info, Mint>,
+    pub lp_mint: Account<'info, Mint>,
     #[account(
         mut,
         associated_token::mint = mint_x,
         associated_token::authority = config,
     )]
-    pub vault_x : InterfaceAccount<'info, TokenAccount>,
+    pub vault_x: Account<'info, TokenAccount>,
     #[account(
         mut,
         associated_token::mint = mint_y,
         associated_token::authority = config,
     )]
-    pub vault_y : InterfaceAccount<'info, TokenAccount>,
+    pub vault_y: Account<'info, TokenAccount>,
     #[account(
         mut,
         associated_token::mint = mint_x,
         associated_token::authority = lp_provider,
     )]
-    pub lp_provider_ata_x: InterfaceAccount<'info, TokenAccount>,
+    pub lp_provider_ata_x: Account<'info, TokenAccount>,
     #[account(
         mut,
         associated_token::mint = mint_y,
         associated_token::authority = lp_provider,
     )]
-    pub lp_provider_ata_y: InterfaceAccount<'info, TokenAccount>,
+    pub lp_provider_ata_y: Account<'info, TokenAccount>,
     #[account(
-        mut,
+        init_if_needed,
+        payer = lp_provider,
         associated_token::mint = lp_mint,
         associated_token::authority = lp_provider,
-        payer = lp_provider,
     )]
-    pub lp_provider_ata_lp: InterfaceAccount<'info, TokenAccount>,
-    pub token_program : Program<'info, TokenInterface>,
-    pub system_program : Program<'info, System>,
-    pub associated_token_program : Program<'info, AssociatedToken>,
+    pub lp_provider_ata_lp: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
 }
 
 impl<'info> Deposit<'info> {
@@ -77,16 +74,16 @@ impl<'info> Deposit<'info> {
         require!(lp_amount > 0, AmmError::InvalidAmount);
         require!(!self.config.locked, AmmError::AMMLocked);
 
-        let (x, y) = match self.mint_lp.supply == 0 && self.vault_x.amount == 0 && self.vault_y.amount == 0 {
+        let (x, y) = match self.lp_mint.supply == 0 && self.vault_x.amount == 0 && self.vault_y.amount == 0 {
             true => (max_x, max_y),
             false => {
                 let amounts = ConstantProduct::xy_deposit_amounts_from_l(
                     self.vault_x.amount,
                     self.vault_y.amount,
-                    self.mint_lp.supply,
+                    self.lp_mint.supply,
                     lp_amount,
                     6,
-                ).unwrap();
+                ).map_err(|_| AmmError::InvalidAmount)?; // Handle error properly
                 (amounts.x, amounts.y) 
             },
         };
@@ -130,16 +127,23 @@ impl<'info> Deposit<'info> {
         let cpi_program = self.token_program.to_account_info();
 
         let cpi_accounts = MintTo {
-            mint: self.mint_lp.to_account_info(),
+            mint: self.lp_mint.to_account_info(),
             to: self.lp_provider_ata_lp.to_account_info(),
             authority: self.config.to_account_info(),
         };
 
-        let mint_y = self.mint_y.key().to_bytes();
         let mint_x = self.mint_x.key().to_bytes();
+        let mint_y = self.mint_y.key().to_bytes();
         let seed = self.config.seed.to_le_bytes();
 
-        let seeds = [b"config", mint_x.as_ref(), mint_y.as_ref(), seed.as_ref()];
+        // FIXED: Add the config bump to signer seeds
+        let seeds = [
+            b"config", 
+            mint_x.as_ref(), 
+            mint_y.as_ref(), 
+            seed.as_ref(),
+            &[self.config.config_bump]
+        ];
 
         let signer_seeds = &[&seeds[..]];
 

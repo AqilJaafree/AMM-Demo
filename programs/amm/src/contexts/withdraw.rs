@@ -1,20 +1,18 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{burn, transfer_checked, Burn, TransferChecked};
-use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
+use anchor_spl::token::{burn, transfer_checked, Burn, TransferChecked, Token, Mint, TokenAccount};
 
 use constant_product_curve::ConstantProduct;
 
 use crate::state::Config;
 use crate::errors::AmmError;
 
-
 #[derive(Accounts)]
 pub struct Withdraw<'info> {
     #[account(mut)]
-    pub lp_provider : Signer<'info>,
-    pub mint_x: InterfaceAccount<'info, Mint>,
-    pub mint_y: InterfaceAccount<'info, Mint>, 
+    pub lp_provider: Signer<'info>,
+    pub mint_x: Account<'info, Mint>,
+    pub mint_y: Account<'info, Mint>, 
     #[account(
         has_one = mint_x,
         has_one = mint_y,
@@ -28,45 +26,46 @@ pub struct Withdraw<'info> {
     )]
     pub config: Account<'info, Config>,
     #[account(
+        mut,
         seeds = [b"lp", config.key().as_ref()],
         bump = config.lp_bump,
         mint::decimals = 6,
         mint::authority = config
     )]
-    pub mint_lp: InterfaceAccount<'info, Mint>,
+    pub mint_lp: Account<'info, Mint>,
     #[account(
         mut,
         associated_token::mint = mint_x,
         associated_token::authority = config,
     )]
-    pub vault_x: InterfaceAccount<'info, TokenAccount>,
+    pub vault_x: Account<'info, TokenAccount>,
     #[account(
         mut,
         associated_token::mint = mint_y,
         associated_token::authority = config,
     )]
-    pub vault_y: InterfaceAccount<'info, TokenAccount>,
+    pub vault_y: Account<'info, TokenAccount>,
     #[account(
         mut,
         associated_token::authority = lp_provider,
         associated_token::mint = mint_x,
     )]
-    pub lp_provider_ata_x: InterfaceAccount<'info, TokenAccount>,
+    pub lp_provider_ata_x: Account<'info, TokenAccount>,
     #[account(
         mut,
         associated_token::authority = lp_provider,
         associated_token::mint = mint_y,
     )]
-    pub lp_provider_ata_y: InterfaceAccount<'info, TokenAccount>,
+    pub lp_provider_ata_y: Account<'info, TokenAccount>,
     #[account(
         init_if_needed,
         payer = lp_provider,
         associated_token::authority = lp_provider,
         associated_token::mint = mint_lp,
     )]
-    pub lp_provider_ata_lp: InterfaceAccount<'info, TokenAccount>,
+    pub lp_provider_ata_lp: Account<'info, TokenAccount>,
 
-    pub token_program: Interface<'info, TokenInterface>,
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub associated_token_program: Program<'info, AssociatedToken>,
 }
@@ -82,7 +81,7 @@ impl<'info> Withdraw<'info> {
             self.mint_lp.supply, 
             lp_amount, 
             6,
-        ).unwrap();
+        ).map_err(|_| AmmError::InvalidAmount)?; // FIXED: Handle error properly
 
         require!(min_x <= xy_amount.x, AmmError::InsufficientTokenX);
         require!(min_y <= xy_amount.y, AmmError::InsufficientTokenY);
@@ -113,14 +112,17 @@ impl<'info> Withdraw<'info> {
             }, self.mint_y.decimals),
         };
 
-        let config_bump = self.config.seed.to_le_bytes();
+        let mint_x = self.mint_x.key().to_bytes();
+        let mint_y = self.mint_y.key().to_bytes();
+        let seed = self.config.seed.to_le_bytes();
 
+        // FIXED: Add config bump to signer seeds
         let seeds = [
             b"config", 
-            self.mint_x.to_account_info().key.as_ref(),
-            self.mint_y.to_account_info().key.as_ref(),
-            config_bump.as_ref(),
-            &[self.config.config_bump],
+            mint_x.as_ref(),
+            mint_y.as_ref(),
+            seed.as_ref(),
+            &[self.config.config_bump]
         ];
 
         let signer_seeds = &[&seeds[..]];

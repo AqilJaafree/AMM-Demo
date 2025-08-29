@@ -4,6 +4,8 @@ mod state;
 mod contexts;
 mod errors;
 
+use contexts::*;
+
 declare_id!("3FqHinWiuVAhvL8o9MWeZAny2a6BqtEYqxTTcFS84Sqa");
 
 #[program]
@@ -25,11 +27,9 @@ pub mod amm {
         Ok(())
     }
 
-    pub fn swap(ctx: Context<Swap>, args: SwapArgs) -> Result<()> {
+    pub fn swap(ctx: Context<Swap>, is_x: bool, amount: u64, min: u64) -> Result<()> {
+        let args = SwapArgs { is_x, amount, min };
         ctx.accounts.swap(args)?;
         Ok(())
     }
 }
-
-#[derive(Accounts)]
-pub struct Initialize {}
